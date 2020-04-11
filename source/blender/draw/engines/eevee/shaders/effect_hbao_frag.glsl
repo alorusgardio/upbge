@@ -35,6 +35,28 @@ https://github.com/NVIDIAGameWorks/D3DSamples/tree/master/samples/DeinterleavedT
 #extension GL_ARB_shading_language_include : enable
 #include "common.h"
 
+
+uniform sampler2D bgl_RenderedTexture;
+uniform sampler2D bgl_DepthTexture;
+uniform sampler2D texRandom;
+uniform float bgl_RenderedTextureWidth;
+uniform float bgl_RenderedTextureHeight;
+uniform mat4 P;
+
+vec2 InvFullResolution = 1. / vec2(bgl_RenderedTextureWidth, bgl_RenderedTextureHeight);
+vec2 AO_RANDOMTEX_SIZE = vec2(bgl_RenderedTextureWidth, bgl_RenderedTextureHeight);
+
+// tweakables
+const float  NUM_STEPS = 4;
+const float  NUM_DIRECTIONS = 8; // texRandom/g_Jitter initialization depends on this
+
+float znear = 0.00001;
+float zfar = 100000.0;
+float width = bgl_RenderedTextureWidth;
+float height = bgl_RenderedTextureHeight;
+
+vec4 projInfo = vec4(-2.0 / (width*P[0][0]), -2.0 / (height*P[1][1]), ( 1.0 - P[0][2]) / P[0][0], ( 1.0 - P[1][2]) / P[1][1]);
+
 // The pragma below is critical for optimal performance
 // in this fragment shader to let the shader compiler
 // fully optimize the maths and batch the texture fetches
