@@ -1,264 +1,286 @@
-// This is a HBAO-Shader for OpenGL, based upon nvidias directX implementation
-// supplied in their SampleSDK available from nvidia.com
-// The slides describing the implementation is available at
-// http://www.nvidia.co.uk/object/siggraph-2008-HBAO.html
+/* Copyright (c) 2014-2018, NVIDIA CORPORATION. All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ *  * Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ *  * Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *  * Neither the name of NVIDIA CORPORATION nor the names of its
+ *    contributors may be used to endorse or promote products derived
+ *    from this software without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS ``AS IS'' AND ANY
+ * EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE COPYRIGHT OWNER OR
+ * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
+ * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+ * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+ * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+ * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ */
 
-#define hbao_textureLod(a, b, c) textureLod(a, b, c)
+/* 
+Based on DeinterleavedTexturing sample by Louis Bavoil
+https://github.com/NVIDIAGameWorks/D3DSamples/tree/master/samples/DeinterleavedTexturing
+*/
 
-uniform sampler2D bgl_DepthTexture;
-uniform sampler2D bgl_NoiseTexture;
-uniform float bgl_RenderedTextureWidth;
-uniform float bgl_RenderedTextureHeight;
-//Camera Settings
-uniform float near = 0.1;
-uniform float far = 100.0;
-uniform float flen = 50.0;
-uniform float AOStrength = 5.0;
+#version 430
 
-const float PI = 3.14159265;
+#extension GL_ARB_shading_language_include : enable
+#include "common.h"
 
-in vec4 uvcoordsvar;
-out vec4 fragColor;
+// The pragma below is critical for optimal performance
+// in this fragment shader to let the shader compiler
+// fully optimize the maths and batch the texture fetches
+// optimally
 
-vec2 resolution = vec2(bgl_RenderedTextureWidth, bgl_RenderedTextureHeight);
+#pragma optionNV(unroll all)
 
-float fov = flen / 180.0 * PI;
-vec2 FocalLen = vec2(1.0 / tan(fov*0.5) * resolution.y / resolution.x, 1.0 / tan(fov * 0.5));
-vec2 InvF = 1.0 / FocalLen;
-vec2 UVToViewA = vec2(2.0 * InvF.x, -2.0 * InvF.y);
-vec2 UVToViewB = vec2(-1.0 * InvF.x, 1.0 * InvF.y);
-vec2 LinMAD = vec2((near - far)/(2.0 * near * far),(near + far)/(2.0 * near * far));
-vec2 AORes = resolution;
-vec2 InvAORes = 1.0 / resolution;
-vec2 NoiseScale = resolution / 4.0;
+#ifndef AO_DEINTERLEAVED
+#define AO_DEINTERLEAVED 1
+#endif
 
-float R = 0.3;
-float R2 = 0.3*0.3;
-float NegInvR2 = - 1.0 / (0.3*0.3);
-float TanBias = tan(30.0 * PI / 180.0);
-float MaxRadiusPixels = 50.0;
+#ifndef AO_BLUR
+#define AO_BLUR 1
+#endif
 
-int NumDirections = 6;
-int NumSamples = 4;
+#ifndef AO_LAYERED
+#define AO_LAYERED 1
+#endif
 
-float ViewSpaceZFromDepth(float d)
+#define M_PI 3.14159265f
+
+// tweakables
+const float  NUM_STEPS = 4;
+const float  NUM_DIRECTIONS = 8; // texRandom/g_Jitter initialization depends on this
+
+layout(std140,binding=0) uniform controlBuffer {
+  HBAOData   control;
+};
+
+#if AO_DEINTERLEAVED
+
+#if AO_LAYERED
+  vec2 g_Float2Offset = control.float2Offsets[gl_PrimitiveID].xy;
+  vec4 g_Jitter       = control.jitters[gl_PrimitiveID];
+  
+  layout(binding=0) uniform sampler2DArray texLinearDepth;
+  layout(binding=1) uniform sampler2D texViewNormal;
+
+  vec3 getQuarterCoord(vec2 UV){
+    return vec3(UV,float(gl_PrimitiveID));
+  }
+  #if AO_LAYERED == 1
+  
+    #if AO_BLUR
+      layout(binding=0,rg16f) uniform image2DArray imgOutput;
+    #else
+      layout(binding=0,r8) uniform image2DArray imgOutput;
+    #endif
+
+    void outputColor(vec4 color) {
+      imageStore(imgOutput, ivec3(ivec2(gl_FragCoord.xy),gl_PrimitiveID), color);
+    }
+  #else
+    layout(location=0,index=0) out vec4 out_Color;
+  
+    void outputColor(vec4 color) {
+      out_Color = color;
+    }
+  #endif
+#else
+  layout(location=0) uniform vec2 g_Float2Offset;
+  layout(location=1) uniform vec4 g_Jitter;
+  
+  layout(binding=0) uniform sampler2D texLinearDepth;
+  layout(binding=1) uniform sampler2D texViewNormal;
+  
+  vec2 getQuarterCoord(vec2 UV){
+    return UV;
+  }
+
+  layout(location=0,index=0) out vec4 out_Color;
+  
+  void outputColor(vec4 color) {
+    out_Color = color;
+  }
+#endif
+  
+#else
+  layout(binding=0) uniform sampler2D texLinearDepth;
+  layout(binding=1) uniform sampler2D texRandom;
+  
+  layout(location=0,index=0) out vec4 out_Color;
+  
+  void outputColor(vec4 color) {
+    out_Color = color;
+  }
+#endif
+
+in vec2 texCoord;
+
+//----------------------------------------------------------------------------------
+
+vec3 UVToView(vec2 uv, float eye_z)
 {
-    // [0,1] -> [-1,1] clip space
-    d = d * 2.0 - 1.0;
-
-    // Get view space Z
-    return -1.0 / (LinMAD.x * d + LinMAD.y);
+  return vec3((uv * control.projInfo.xy + control.projInfo.zw) * (control.projOrtho != 0 ? 1. : eye_z), eye_z);
 }
 
-vec3 UVToViewSpace(vec2 uv, float z)
+#if AO_DEINTERLEAVED
+
+vec3 FetchQuarterResViewPos(vec2 UV)
 {
-    uv = UVToViewA * uv + UVToViewB;
-    return vec3(uv * z, z);
+  float ViewDepth = textureLod(texLinearDepth,getQuarterCoord(UV),0).x;
+  return UVToView(UV, ViewDepth);
 }
 
-vec3 GetViewPos(vec2 uv)
-{
-    float z = ViewSpaceZFromDepth(texture(bgl_DepthTexture, uv).r);
-    //float z = texture(bgl_DepthTexture, uv).r;
-    return UVToViewSpace(uv, z);
-}
+#else //AO_DEINTERLEAVED
 
-vec3 GetViewPosPoint(ivec2 uv)
+vec3 FetchViewPos(vec2 UV)
 {
-    ivec2 coord = ivec2(gl_FragCoord.xy) + uv;
-    float z = texelFetch(bgl_DepthTexture, coord, 0).r;
-    return UVToViewSpace(uv, z);
-}
-
-float TanToSin(float x)
-{
-    return x * inversesqrt(x*x + 1.0);
-}
-
-float InvLength(vec2 V)
-{
-    return inversesqrt(dot(V,V));
-}
-
-float Tangent(vec3 V)
-{
-    return V.z * InvLength(V.xy);
-}
-
-float BiasedTangent(vec3 V)
-{
-    return V.z * InvLength(V.xy) + TanBias;
-}
-
-float Tangent(vec3 P, vec3 S)
-{
-    return -(P.z - S.z) * InvLength(S.xy - P.xy);
-}
-
-float Length2(vec3 V)
-{
-    return dot(V,V);
+  float ViewDepth = textureLod(texLinearDepth,UV,0).x;
+  return UVToView(UV, ViewDepth);
 }
 
 vec3 MinDiff(vec3 P, vec3 Pr, vec3 Pl)
 {
-    vec3 V1 = Pr - P;
-    vec3 V2 = P - Pl;
-    return (Length2(V1) < Length2(V2)) ? V1 : V2;
+  vec3 V1 = Pr - P;
+  vec3 V2 = P - Pl;
+  return (dot(V1,V1) < dot(V2,V2)) ? V1 : V2;
 }
 
-vec2 SnapUVOffset(vec2 uv)
+vec3 ReconstructNormal(vec2 UV, vec3 P)
 {
-    return round(uv * AORes) * InvAORes;
+  vec3 Pr = FetchViewPos(UV + vec2(control.InvFullResolution.x, 0));
+  vec3 Pl = FetchViewPos(UV + vec2(-control.InvFullResolution.x, 0));
+  vec3 Pt = FetchViewPos(UV + vec2(0, control.InvFullResolution.y));
+  vec3 Pb = FetchViewPos(UV + vec2(0, -control.InvFullResolution.y));
+  return normalize(cross(MinDiff(P, Pr, Pl), MinDiff(P, Pt, Pb)));
 }
 
-float Falloff(float d2)
+#endif //AO_DEINTERLEAVED
+
+//----------------------------------------------------------------------------------
+float Falloff(float DistanceSquare)
 {
-    return d2 * NegInvR2 + 1.0;
+  // 1 scalar mad instruction
+  return DistanceSquare * control.NegInvR2 + 1.0;
 }
 
-float HorizonOcclusion(	vec2 deltaUV,
-                        vec3 P,
-                        vec3 dPdu,
-                        vec3 dPdv,
-                        float randstep,
-                        float numSamples)
+//----------------------------------------------------------------------------------
+// P = view-space position at the kernel center
+// N = view-space normal at the kernel center
+// S = view-space position of the current sample
+//----------------------------------------------------------------------------------
+float ComputeAO(vec3 P, vec3 N, vec3 S)
 {
-    float ao = 0.0;
+  vec3 V = S - P;
+  float VdotV = dot(V, V);
+  float NdotV = dot(N, V) * 1.0/sqrt(VdotV);
 
-    // Offset the first coord with some noise
-    vec2 uv = uvcoordsvar.xy + SnapUVOffset(randstep*deltaUV);
-    deltaUV = SnapUVOffset( deltaUV );
+  // Use saturate(x) instead of max(x,0.f) because that is faster on Kepler
+  return clamp(NdotV - control.NDotVBias,0,1) * clamp(Falloff(VdotV),0,1);
+}
 
-    // Calculate the tangent vector
-    vec3 T = deltaUV.x * dPdu + deltaUV.y * dPdv;
+//----------------------------------------------------------------------------------
+vec2 RotateDirection(vec2 Dir, vec2 CosSin)
+{
+  return vec2(Dir.x*CosSin.x - Dir.y*CosSin.y,
+              Dir.x*CosSin.y + Dir.y*CosSin.x);
+}
 
-    // Get the angle of the tangent vector from the viewspace axis
-    float tanH = BiasedTangent(T);
-    float sinH = TanToSin(tanH);
+//----------------------------------------------------------------------------------
+vec4 GetJitter()
+{
+#if AO_DEINTERLEAVED
+  // Get the current jitter vector from the per-pass constant buffer
+  return g_Jitter;
+#else
+  // (cos(Alpha),sin(Alpha),rand1,rand2)
+  return textureLod( texRandom, (gl_FragCoord.xy / AO_RANDOMTEX_SIZE), 0);
+#endif
+}
 
-    float tanS;
-    float d2;
-    vec3 S;
+//----------------------------------------------------------------------------------
+float ComputeCoarseAO(vec2 FullResUV, float RadiusPixels, vec4 Rand, vec3 ViewPosition, vec3 ViewNormal)
+{
+#if AO_DEINTERLEAVED
+  RadiusPixels /= 4.0;
+#endif
 
-    // Sample to find the maximum angle
-    for(float s = 1.0; s <= numSamples; ++s)
+  // Divide by NUM_STEPS+1 so that the farthest samples are not fully attenuated
+  float StepSizePixels = RadiusPixels / (NUM_STEPS + 1);
+
+  const float Alpha = 2.0 * M_PI / NUM_DIRECTIONS;
+  float AO = 0;
+
+  for (float DirectionIndex = 0; DirectionIndex < NUM_DIRECTIONS; ++DirectionIndex)
+  {
+    float Angle = Alpha * DirectionIndex;
+
+    // Compute normalized 2D direction
+    vec2 Direction = RotateDirection(vec2(cos(Angle), sin(Angle)), Rand.xy);
+
+    // Jitter starting sample within the first step
+    float RayPixels = (Rand.z * StepSizePixels + 1.0);
+
+    for (float StepIndex = 0; StepIndex < NUM_STEPS; ++StepIndex)
     {
-        uv += deltaUV;
-        S = GetViewPos(uv);
-        tanS = Tangent(P, S);
-        d2 = Length2(S - P);
+#if AO_DEINTERLEAVED
+      vec2 SnappedUV = round(RayPixels * Direction) * control.InvQuarterResolution + FullResUV;
+      vec3 S = FetchQuarterResViewPos(SnappedUV);
+#else
+      vec2 SnappedUV = round(RayPixels * Direction) * control.InvFullResolution + FullResUV;
+      vec3 S = FetchViewPos(SnappedUV);
+#endif
 
-        // Is the sample within the radius and the angle greater?
-        if(d2 < R2 && tanS > tanH)
-        {
-            float sinS = TanToSin(tanS);
-            // Apply falloff based on the distance
-            ao += Falloff(d2) * (sinS - sinH);
+      RayPixels += StepSizePixels;
 
-            tanH = tanS;
-            sinH = sinS;
-        }
+      AO += ComputeAO(ViewPosition, ViewNormal, S);
     }
-    
-    return ao;
+  }
+
+  AO *= control.AOMultiplier / (NUM_DIRECTIONS * NUM_STEPS);
+  return clamp(1.0 - AO * 2.0,0,1);
 }
 
-vec2 RotateDirections(vec2 Dir, vec2 CosSin)
+//----------------------------------------------------------------------------------
+void main()
 {
-    return vec2(Dir.x*CosSin.x - Dir.y*CosSin.y,
-                  Dir.x*CosSin.y + Dir.y*CosSin.x);
-}
+  
+#if AO_DEINTERLEAVED
+  vec2 base = floor(gl_FragCoord.xy) * 4.0 + g_Float2Offset;
+  vec2 uv = base * (control.InvQuarterResolution / 4.0);
 
-void ComputeSteps(inout vec2 stepSizeUv, inout float numSteps, float rayRadiusPix, float rand)
-{
-    // Avoid oversampling if numSteps is greater than the kernel radius in pixels
-    numSteps = min(NumSamples, rayRadiusPix);
+  vec3 ViewPosition = FetchQuarterResViewPos(uv);
+  vec4 NormalAndAO =  texelFetch( texViewNormal, ivec2(base), 0);
+  vec3 ViewNormal =  -(NormalAndAO.xyz * 2.0 - 1.0);
+#else
+  vec2 uv = texCoord;
+  vec3 ViewPosition = FetchViewPos(uv);
 
-    // Divide by Ns+1 so that the farthest samples are not fully attenuated
-    float stepSizePix = rayRadiusPix / (numSteps + 1);
+  // Reconstruct view-space normal from nearest neighbors
+  vec3 ViewNormal = -ReconstructNormal(uv, ViewPosition);
+#endif
 
-    // Clamp numSteps if it is greater than the max kernel footprint
-    float maxNumSteps = MaxRadiusPixels / stepSizePix;
-    if (maxNumSteps < numSteps)
-    {
-        // Use dithering to avoid AO discontinuities
-        numSteps = floor(maxNumSteps + rand);
-        numSteps = max(numSteps, 1);
-        stepSizePix = MaxRadiusPixels / numSteps;
-    }
+  // Compute projection of disk of radius control.R into screen space
+  float RadiusPixels = control.RadiusToScreen / (control.projOrtho != 0 ? 1.0 : ViewPosition.z);
 
-    // Step size in uv space
-    stepSizeUv = stepSizePix * InvAORes;
-}
+  // Get jitter vector for the current full-res pixel
+  vec4 Rand = GetJitter();
 
-void main(void)
-{
-    float numDirections = NumDirections;
+  float AO = ComputeCoarseAO(uv, RadiusPixels, Rand, ViewPosition, ViewNormal);
 
-    vec3 P, Pr, Pl, Pt, Pb;
-    P 	= GetViewPos(uvcoordsvar.xy);
-
-    // Sample neighboring pixels
-    Pr 	= GetViewPos(uvcoordsvar.xy + vec2( InvAORes.x, 0));
-    Pl 	= GetViewPos(uvcoordsvar.xy + vec2(-InvAORes.x, 0));
-    Pt 	= GetViewPos(uvcoordsvar.xy + vec2( 0, InvAORes.y));
-    Pb 	= GetViewPos(uvcoordsvar.xy + vec2( 0,-InvAORes.y));
-
-    // Calculate tangent basis vectors using the minimu difference
-    vec3 dPdu = MinDiff(P, Pr, Pl);
-    vec3 dPdv = MinDiff(P, Pt, Pb) * (AORes.y * InvAORes.x);
-
-    // Get the random samples from the noise texture
-    vec3 random = texture(bgl_NoiseTexture, uvcoordsvar.xy * NoiseScale).rgb;
-
-    // Calculate the projected size of the hemisphere
-    vec2 rayRadiusUV = 0.5 * R * FocalLen / -P.z;
-    float rayRadiusPix = rayRadiusUV.x * AORes.x;
-
-    float ao = 1.0;
-
-    // Make sure the radius of the evaluated hemisphere is more than a pixel
-    if(rayRadiusPix > 1.0)
-    {
-        ao = 0.0;
-        float numSteps;
-        vec2 stepSizeUV;
-
-        // Compute the number of steps
-        ComputeSteps(stepSizeUV, numSteps, rayRadiusPix, random.z);
-
-        float alpha = 2.0 * PI / numDirections;
-
-        // Calculate the horizon occlusion of each direction
-        for(float d = 0; d < numDirections; ++d)
-        {
-            float theta = alpha * d;
-
-            // Apply noise to the direction
-            vec2 dir = RotateDirections(vec2(cos(theta), sin(theta)), random.xy);
-            vec2 deltaUV = dir * stepSizeUV;
-
-            // Sample the pixels along the direction
-            ao += HorizonOcclusion(	deltaUV,
-                                    P,
-                                    dPdu,
-                                    dPdv,
-                                    random.z,
-                                    numSteps);
-        }
-
-        // Average the results and produce the final AO
-        ao = 1.0 - ao / numDirections * AOStrength;
-    }
-
-    float depth = hbao_textureLod(bgl_DepthTexture, uvcoordsvar.xy, 0.0).r;
-
-    if (depth == 1.0) {
-        /* Do not trace for background */
-        fragColor = vec4(1.0, 0.0, 0.0, 1.0);
-    }
-    else {
-        fragColor = vec4(ao, 30.0 * P.z, 0.0, 1.0);
-    }
+#if AO_BLUR
+  outputColor(vec4(pow(AO, control.PowExponent), ViewPosition.z, 0, 0));
+#else
+  outputColor(vec4(pow(AO, control.PowExponent)));
+#endif
+  
 }
